@@ -136,13 +136,13 @@ async def test_gives_up_after_the_retry_limit(
     assert failures.received[0].symbols == {"KRW-BTC"}
 
 
-async def test_sends_are_spaced_by_the_send_interval(server: FakeUpbit, monkeypatch) -> None:
-    monkeypatch.setattr(_ws, "SEND_INTERVAL", 0.05)
+async def test_close_is_quick_even_if_nobody_reads(server: FakeUpbit) -> None:
+    """읽지 않아 수신 큐가 찬 연결도 `close_timeout`을 기다리지 않고 닫힌다."""
+
     ctx = _ws.WsContext(UpbitTickerReq(url=server.url), server.url)
+    await ctx.subscribe({"type": "ticker", "codes": ["KRW-BTC", "KRW-ETH"]})
+    await asyncio.sleep(0.3)  # 가짜 서버가 0.01초마다 보내 수신 큐(16개)가 찬다
     started = time.monotonic()
-    try:
-        await ctx.subscribe({"type": "ticker", "codes": ["KRW-BTC"]})  # 연결 + 전송
-        await ctx.subscribe({"type": "ticker", "codes": ["KRW-ETH"]})
-    finally:
-        await ctx.aclose()
-    assert time.monotonic() - started >= 0.1  # 연결 뒤 두 번의 전송이 각각 간격을 둔다
+    await ctx.aclose()
+    assert time.monotonic() - started < 1.0
+    await wait_until(lambda: server.open_connections == 0)

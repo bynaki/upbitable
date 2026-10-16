@@ -2,22 +2,27 @@
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
+import jwt
 from websockets.asyncio.server import Server, ServerConnection, serve
 
-from tests.support.samples import TICKER
+from tests.support.samples import MY_ASSET, MY_ORDER, TICKER
 
 PUBLISH_INTERVAL = 0.01
 """구독한 코드마다 메시지를 보내는 간격(초)."""
 
 
 class FakeUpbit:
-    """구독 메시지를 받으면 그 codes마다 ticker를 계속 보낸다.
+    """구독 메시지를 받으면 그 codes마다 데이터를 계속 보낸다.
 
-    새 구독 메시지가 오면 실제 서버처럼 그 연결의 기존 구독을 대체한다.
+    type이 `myOrder`면 myOrder 예제를, `myAsset`이면 codes 없이 myAsset 예제를, 그 밖에는 ticker
+    예제를 보낸다. 새 구독 메시지가 오면 실제 서버처럼 그 연결의 기존 구독을 대체한다.
+    `secrets`를 정해 두면 연결의 `Authorization` 헤더를 HS512 JWT로 검증하고, 실패하면 구독 메시지에
+    `INVALID_AUTH`를 보낸다.
     """
 
     def __init__(self) -> None:
@@ -29,6 +34,14 @@ class FakeUpbit:
         """닫힌 연결 수."""
         self.error: dict[str, str] | None = None
         """정해 두면 다음 구독 메시지에 데이터 대신 이 오류를 보낸다."""
+        self.secrets: dict[str, str] | None = None
+        """access key → secret key. 정해 두면 인증 헤더를 검증한다."""
+        self.tokens: list[dict[str, Any]] = []
+        """검증을 통과한 JWT payload(연결 순서)."""
+        self.connected_at: list[float] = []
+        """연결마다 맺어진 시각(`time.monotonic()`)."""
+        self.subscribed_at: list[float] = []
+        """구독 메시지마다 받은 시각(`time.monotonic()`)."""
         self._server: Server | None = None
 
     @property
@@ -55,17 +68,20 @@ class FakeUpbit:
     async def _handler(self, ws: ServerConnection) -> None:
         index = len(self.connections)
         self.connections.append(ws)
+        self.connected_at.append(time.monotonic())
+        auth_error = self._check_auth(ws)
         publisher: asyncio.Task | None = None
         try:
             async for raw in ws:
                 payload = json.loads(raw)
                 self.subscriptions.append((index, payload))
+                self.subscribed_at.append(time.monotonic())
                 if publisher:
                     publisher.cancel()
-                if self.error:
-                    await ws.send(json.dumps({"error": self.error}))
+                if error := auth_error or self.error:
+                    await ws.send(json.dumps({"error": error}))
                     continue
-                codes = [code.split(".")[0] for code in payload[1]["codes"]]
+                codes = [code.split(".")[0] for code in payload[1].get("codes", [""])]
                 publisher = asyncio.create_task(self._publish(ws, payload[1]["type"], codes))
         except Exception:
             pass
@@ -76,11 +92,35 @@ class FakeUpbit:
                     await publisher
             self.closed += 1
 
+    def _check_auth(self, ws: ServerConnection) -> dict[str, str] | None:
+        """인증 헤더를 검증한다. 문제가 있으면 보낼 오류를 돌려준다."""
+
+        if self.secrets is None:
+            return None
+        assert ws.request is not None
+        header = ws.request.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            return {"name": "INVALID_AUTH", "message": "no token"}
+        token = header.removeprefix("Bearer ")
+        try:
+            access_key = jwt.decode(token, options={"verify_signature": False})["access_key"]
+            secret = self.secrets[access_key]
+            payload = jwt.decode(token, secret, algorithms=["HS512"])
+        except jwt.InvalidTokenError, KeyError:
+            return {"name": "INVALID_AUTH", "message": "bad token"}
+        self.tokens.append(payload)
+        return None
+
     async def _publish(self, ws: ServerConnection, type_: str, codes: list[str]) -> None:
         stream_type = "SNAPSHOT"
         while True:
             for code in codes:
-                msg = {**TICKER, "type": type_, "code": code, "stream_type": stream_type}
+                if type_ == "myAsset":
+                    msg = {**MY_ASSET, "stream_type": stream_type}
+                elif type_ == "myOrder":
+                    msg = {**MY_ORDER, "code": code, "stream_type": stream_type}
+                else:
+                    msg = {**TICKER, "type": type_, "code": code, "stream_type": stream_type}
                 await ws.send(json.dumps(msg).encode())
             stream_type = "REALTIME"
             await asyncio.sleep(PUBLISH_INTERVAL)

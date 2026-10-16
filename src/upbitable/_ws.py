@@ -3,12 +3,15 @@
 binder가 쓰는 내부 모듈이다. 연결 하나를 `WsContext`가 갖고, 소스 generator가 바뀔 때(심볼
 합집합이 바뀔 때)마다 같은 연결에 구독 메시지를 다시 보낸다. Upbit는 새 구독 메시지가 그 연결의
 기존 구독을 대체하므로 합집합 전체를 보내면 된다.
+
+Upbit 요청 수 제한은 측정 단위가 다르다. 연결 요청은 인증 없이는 IP, 인증하면 포켓 단위로 세므로
+프로세스 전체가 키(`"ip"`, `"pocket:<이름>"`)마다 제한기 하나를 함께 쓴다. 메시지는 연결마다 센다.
 """
 
 import asyncio
 import json
-import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
+from contextlib import suppress
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -18,11 +21,19 @@ from trading_core.logger import get_logger
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
+from upbitable._limits import RateLimiter, Window
+
 PUBLIC_URL = "wss://api.upbit.com/websocket/v1"
 """공개 시세(ticker·trade·orderbook·candle) endpoint. 인증이 없다."""
 
-SEND_INTERVAL = 0.2
-"""연결·메시지 전송 사이의 최소 간격(초). Upbit 한도는 연결·메시지 각각 초당 5회다."""
+PRIVATE_URL = "wss://api.upbit.com/websocket/v1/private"
+"""내 주문(myOrder)·내 자산(myAsset) endpoint. JWT 인증이 필요하다."""
+
+CONNECT_LIMITS: tuple[Window, ...] = ((5, 1.0),)
+"""연결 요청 한도(`websocket-connect`). IP 또는 포켓마다 초당 5회."""
+
+MESSAGE_LIMITS: tuple[Window, ...] = ((5, 1.0), (100, 60.0))
+"""메시지 전송 한도(`websocket-message`). 연결마다 초당 5회, 분당 100회."""
 
 RETRY_LIMIT = 5
 """연결이 연속으로 이만큼 실패하면 재연결을 그만두고 예외를 올린다."""
@@ -34,6 +45,18 @@ RETRY_MAX_DELAY = 30.0
 """재연결 대기의 상한(초)."""
 
 log = get_logger(__name__)
+
+_connect_limiters: dict[str, RateLimiter] = {}
+
+
+def connect_limiter(key: str) -> RateLimiter:
+    """연결 한도를 함께 쓰는 단위(`"ip"`, `"pocket:<이름>"`)의 제한기. 처음 부를 때 만든다."""
+
+    limiter = _connect_limiters.get(key)
+    if limiter is None:
+        limiter = _connect_limiters[key] = RateLimiter(*CONNECT_LIMITS)
+    return limiter
+
 
 type Message = dict[str, Any]
 
@@ -78,29 +101,37 @@ class WsContext[Treq: SourceRequest]:
 
     init 콜백이 만들고 `@x.detached`에서 `aclose()`한다. 소스 generator는 콜백 인자로 요청을
     받지 못하므로 구독 메시지에 필요한 요청 필드를 `req`로 꺼낸다.
+
+    - `limit_key`: 연결 한도를 함께 쓰는 단위. 공개 연결은 `"ip"`, 인증 연결은 `"pocket:<이름>"`.
+    - `headers`: 연결할 때마다 불러 handshake 헤더를 만든다(JWT는 연결마다 새로 만들어야 한다).
     """
 
-    def __init__(self, req: Treq, url: str) -> None:
+    def __init__(
+        self,
+        req: Treq,
+        url: str,
+        *,
+        limit_key: str = "ip",
+        headers: Callable[[], dict[str, str]] | None = None,
+    ) -> None:
         self.req = req
         self.url = url
+        self.limit_key = limit_key
         self.ticket = str(uuid4())
+        self._headers = headers
         self._ws: ClientConnection | None = None
-        self._last_sent = 0.0
-
-    async def _throttle(self) -> None:
-        wait = self._last_sent + SEND_INTERVAL - time.monotonic()
-        if wait > 0:
-            await asyncio.sleep(wait)
-        self._last_sent = time.monotonic()
+        self._messages = RateLimiter(*MESSAGE_LIMITS)
 
     async def subscribe(self, type_obj: Message) -> None:
         """구독 메시지를 보낸다. 연결이 없으면 먼저 연결한다."""
 
         if self._ws is None:
-            await self._throttle()
-            self._ws = await connect(self.url)
+            await connect_limiter(self.limit_key).acquire()
+            headers = self._headers() if self._headers else None
+            self._ws = await connect(self.url, additional_headers=headers)
+            self._messages = RateLimiter(*MESSAGE_LIMITS)
         payload = [{"ticket": self.ticket}, type_obj, {"format": "DEFAULT"}]
-        await self._throttle()
+        await self._messages.acquire()
         await self._ws.send(encode(payload))
 
     async def recv(self) -> Message:
@@ -111,11 +142,28 @@ class WsContext[Treq: SourceRequest]:
         return decode(await self._ws.recv())
 
     async def aclose(self) -> None:
-        """연결을 닫는다. 다시 `subscribe()`하면 새로 연결한다."""
+        """연결을 닫는다. 다시 `subscribe()`하면 새로 연결한다.
+
+        닫는 동안 남은 메시지를 읽어 버린다. 아무도 읽지 않아 수신 큐가 차면 websockets가 소켓
+        읽기를 멈춰 서버의 close 응답도 읽지 못하고, `close()`가 `close_timeout`(10초)만큼 멈춘다.
+        """
 
         ws, self._ws = self._ws, None
-        if ws is not None:
+        if ws is None:
+            return
+        drain = asyncio.create_task(_drain(ws))
+        try:
             await ws.close()
+        finally:
+            drain.cancel()
+            with suppress(asyncio.CancelledError):
+                await drain
+
+
+async def _drain(ws: ClientConnection) -> None:
+    with suppress(Exception):
+        async for _ in ws:
+            pass
 
 
 async def stream_messages(ctx: WsContext, type_obj: Message) -> AsyncGenerator[Message]:

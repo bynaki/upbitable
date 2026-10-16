@@ -11,9 +11,14 @@ from upbitable import _ws
 
 @pytest.fixture(autouse=True)
 def fast_ws(monkeypatch: pytest.MonkeyPatch) -> None:
-    """전송 간격과 재연결 대기를 줄여 테스트를 빠르게 한다."""
+    """요청 수 제한을 풀고 재연결 대기를 줄여 테스트를 빠르게 한다.
 
-    monkeypatch.setattr(_ws, "SEND_INTERVAL", 0.0)
+    연결 제한기는 프로세스 전역이라 테스트마다 비운다. 제한을 시험하는 테스트는 한도를 다시 정한다.
+    """
+
+    monkeypatch.setattr(_ws, "CONNECT_LIMITS", ())
+    monkeypatch.setattr(_ws, "MESSAGE_LIMITS", ())
+    monkeypatch.setattr(_ws, "_connect_limiters", {})
     monkeypatch.setattr(_ws, "RETRY_BASE_DELAY", 0.01)
 
 

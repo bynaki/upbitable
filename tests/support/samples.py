@@ -97,3 +97,50 @@ CANDLE: dict[str, Any] = {
     "timestamp": 1787731717049,
     "stream_type": "SNAPSHOT",
 }
+
+MY_ORDER: dict[str, Any] = {
+    "type": "myOrder",
+    "code": "KRW-BTC",
+    "uuid": "ac2dc2a3-fce9-40a2-a4f6-5987c25c438f",
+    "ask_bid": "BID",
+    "order_type": "limit",
+    "state": "trade",
+    "trade_uuid": "68315169-fba4-4175-ade3-aff14a616657",
+    "price": 0.001453,
+    "avg_price": 0.00145372,
+    "volume": 30925891.29839369,
+    "remaining_volume": 29968038.09235948,
+    "executed_volume": 30925891.29839369,
+    "trades_count": 1,
+    "reserved_fee": 44.23943970238218,
+    "remaining_fee": 21.77177967409916,
+    "paid_fee": 22.467660028283017,
+    "locked": 43565.33112787242,
+    "executed_funds": 44935.32005656603,
+    "time_in_force": None,
+    "trade_fee": 22.467660028283017,
+    "is_maker": True,
+    "identifier": "test-1",
+    "smp_type": "cancel_maker",
+    "prevented_volume": 1.174291929,
+    "prevented_locked": 0.001706246173,
+    "trade_timestamp": 1710751590421,
+    "order_timestamp": 1710751590000,
+    "timestamp": 1710751597500,
+    "stream_type": "REALTIME",
+}
+
+MY_ASSET: dict[str, Any] = {
+    "type": "myAsset",
+    "asset_uuid": "e635f223-1609-4969-8fb6-4376937baad6",
+    "assets": [
+        {
+            "currency": "KRW",
+            "balance": 1386929.37231066771348207123,
+            "locked": 10329.670127489597585685,
+        }
+    ],
+    "asset_timestamp": 1710146517259,
+    "timestamp": 1710146517267,
+    "stream_type": "REALTIME",
+}

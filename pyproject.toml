@@ -37,6 +37,7 @@ asyncio_mode = "auto"
 
 [dependency-groups]
 dev = [
+  "pyjwt>=2.10",
   "pyright>=1.1.411",
   "pytest>=9.1.1",
   "pytest-asyncio>=1.4.0",
