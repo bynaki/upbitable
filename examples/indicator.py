@@ -22,6 +22,7 @@
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta, timezone
 
 from trading_core import Domain, cast_model
 
@@ -29,6 +30,9 @@ from upbitable import Macd, Rsi, UpbitIndicator, UpbitIndicatorReq
 
 ACCOUNT = "upbit-main"
 """자격 증명 파일에서 읽을 이름."""
+
+KST = timezone(timedelta(hours=9))
+"""한국 표준시. 지표 응답은 UTC 시각만 준다."""
 
 COUNT = 2
 """받을 메시지 수(지표 2개 × 마켓 1개 = 캔들 하나)."""
@@ -48,7 +52,11 @@ async def main() -> None:
             print("KRW-BTC 5분봉이 마감되기를 기다린다(최대 5분)...")
             async for data in stream:
                 ind = cast_model(data, UpbitIndicator)
-                print(ind.symbol, ind.candle_date_time_utc, ind.indicator, ind.params, ind.value)
+                start = datetime.fromisoformat(ind.candle_date_time_utc).replace(tzinfo=UTC)
+                kst = start.astimezone(KST).strftime("%Y-%m-%dT%H:%M:%S")
+                params = " ".join(f"{k}={v}" for k, v in ind.params.items())
+                values = " ".join(f"{k}={v:.8f}" for k, v in ind.value.items())
+                print(ind.symbol, kst, ind.indicator, params, values)
                 received += 1
                 if received == COUNT:
                     break

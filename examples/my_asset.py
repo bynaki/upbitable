@@ -28,7 +28,7 @@ async def main() -> None:
             async for data in stream:
                 asset = cast_model(data, UpbitMyAsset)
                 for unit in asset.assets:
-                    print(unit.currency, f"balance={unit.balance:f}", f"locked={unit.locked:f}")
+                    print(unit.currency, f"balance={unit.balance:.8f}", f"locked={unit.locked:.8f}")
                 break
     finally:
         await domain.stop()

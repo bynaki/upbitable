@@ -26,11 +26,11 @@ async def main() -> None:
                     candle.symbol,
                     candle.stream_type,
                     candle.candle_date_time_kst,
-                    candle.opening_price,
-                    candle.high_price,
-                    candle.low_price,
-                    candle.trade_price,
-                    candle.candle_acc_trade_volume,
+                    f"{candle.opening_price:.8f}",
+                    f"{candle.high_price:.8f}",
+                    f"{candle.low_price:.8f}",
+                    f"{candle.trade_price:.8f}",
+                    f"{candle.candle_acc_trade_volume:.8f}",
                 )
                 received += 1
                 if received == COUNT:

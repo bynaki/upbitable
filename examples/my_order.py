@@ -22,6 +22,7 @@
 """
 
 import asyncio
+from decimal import Decimal
 
 from trading_core import Domain, cast_model
 
@@ -32,6 +33,12 @@ ACCOUNT = "upbit-main"
 
 COUNT = 2
 """받을 메시지 수."""
+
+
+def fmt(value: Decimal | None) -> str:
+    """소수 8자리로 찍는다. 시장가 주문처럼 값이 없으면 `-`다."""
+
+    return "-" if value is None else f"{value:.8f}"
 
 
 async def main() -> None:
@@ -48,8 +55,8 @@ async def main() -> None:
                     order.state,
                     order.ask_bid,
                     order.order_type,
-                    order.price,
-                    order.volume,
+                    fmt(order.price),
+                    fmt(order.volume),
                     order.uuid,
                 )
                 received += 1

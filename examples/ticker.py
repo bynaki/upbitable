@@ -22,7 +22,7 @@ async def main() -> None:
         async with domain.stream(UpbitTickerReq(), {"KRW-BTC", "KRW-ETH"}) as stream:
             async for data in stream:
                 ticker = cast_model(data, UpbitTicker)
-                print(ticker.symbol, ticker.stream_type, ticker.trade_price, ticker.change)
+                print(ticker.symbol, ticker.stream_type, f"{ticker.trade_price:.8f}", ticker.change)
                 received += 1
                 if received == COUNT:
                     break

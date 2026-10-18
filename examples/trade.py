@@ -26,8 +26,8 @@ async def main() -> None:
                     trade.symbol,
                     trade.stream_type,
                     trade.ask_bid,
-                    trade.trade_price,
-                    trade.trade_volume,
+                    f"{trade.trade_price:.8f}",
+                    f"{trade.trade_volume:.8f}",
                 )
                 received += 1
                 if received == COUNT:

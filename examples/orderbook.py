@@ -27,8 +27,8 @@ async def main() -> None:
                     book.symbol,
                     book.stream_type,
                     f"units={len(book.orderbook_units)}",
-                    f"ask={best.ask_price}({best.ask_size})",
-                    f"bid={best.bid_price}({best.bid_size})",
+                    f"ask={best.ask_price:.8f}({best.ask_size:.8f})",
+                    f"bid={best.bid_price:.8f}({best.bid_size:.8f})",
                 )
                 received += 1
                 if received == COUNT:
