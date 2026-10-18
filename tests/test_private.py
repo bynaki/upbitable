@@ -7,9 +7,9 @@ from pathlib import Path
 import jwt
 import pytest
 from pydantic import ValidationError
-from trading_core import DataModel, Domain, StageFailed, cast_model
-from trading_core.credentials import CREDENTIALS_ENV
+from trading_core import Domain, cast_model
 
+from tests.support.auth import ACCESS, SECRET, TIMEOUT, Failures, ignore, write_credentials
 from tests.support.fake_upbit import FakeUpbit
 from tests.support.samples import MY_ASSET, MY_ORDER
 from upbitable import (
@@ -22,30 +22,10 @@ from upbitable import (
 )
 from upbitable.private import make_token
 
-ACCESS = "test-access-key"
-SECRET = "test-secret-key-that-must-not-leak-" + "x" * 32
-"""PyJWT가 짧은 HS512 키에 경고하므로 64바이트를 넘게 둔다."""
-TIMEOUT = 2.0
-
 
 @pytest.fixture
 def credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """`upbit-test` 자격 증명 파일을 만들고 환경변수로 가리킨다."""
-
-    path = tmp_path / "credentials.toml"
-    path.write_text(
-        f"""
-[upbit-test]
-exchange = "upbit"
-pocket = "main"
-access_key = "{ACCESS}"
-secret_key = "{SECRET}"
-""",
-        encoding="utf-8",
-    )
-    path.chmod(0o600)
-    monkeypatch.setenv(CREDENTIALS_ENV, str(path))
-    return path
+    return write_credentials(tmp_path, monkeypatch)
 
 
 @pytest.fixture
@@ -58,24 +38,6 @@ def cred() -> UpbitCredential:
     return UpbitCredential.model_validate(
         {"exchange": "upbit", "pocket": "main", "access_key": ACCESS, "secret_key": SECRET}
     )
-
-
-class Failures:
-    def __init__(self) -> None:
-        self.received: list[StageFailed] = []
-
-    async def __call__(self, failed: StageFailed) -> None:
-        self.received.append(failed)
-
-    async def wait(self) -> StageFailed:
-        async with asyncio.timeout(TIMEOUT):
-            while not self.received:
-                await asyncio.sleep(0.005)
-        return self.received[0]
-
-
-async def ignore(_: DataModel) -> None:
-    pass
 
 
 # ----- 자격 증명과 JWT -----

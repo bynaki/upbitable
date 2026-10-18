@@ -9,8 +9,9 @@ from typing import Any
 
 import jwt
 from websockets.asyncio.server import Server, ServerConnection, serve
+from websockets.http11 import Request, Response
 
-from tests.support.samples import MY_ASSET, MY_ORDER, TICKER
+from tests.support.samples import INDICATOR, INDICATOR_SIGNAL, MY_ASSET, MY_ORDER, TICKER
 
 PUBLISH_INTERVAL = 0.01
 """구독한 코드마다 메시지를 보내는 간격(초)."""
@@ -19,10 +20,11 @@ PUBLISH_INTERVAL = 0.01
 class FakeUpbit:
     """구독 메시지를 받으면 그 codes마다 데이터를 계속 보낸다.
 
-    type이 `myOrder`면 myOrder 예제를, `myAsset`이면 codes 없이 myAsset 예제를, 그 밖에는 ticker
-    예제를 보낸다. 새 구독 메시지가 오면 실제 서버처럼 그 연결의 기존 구독을 대체한다.
+    type이 `myOrder`면 myOrder 예제를, `myAsset`이면 codes 없이 myAsset 예제를, `indicator`·
+    `indicator_signal`이면 codes × indicators 조합마다 지표 예제를, 그 밖에는 ticker 예제를
+    보낸다. 새 구독 메시지가 오면 실제 서버처럼 그 연결의 기존 구독을 대체한다.
     `secrets`를 정해 두면 연결의 `Authorization` 헤더를 HS512 JWT로 검증하고, 실패하면 구독 메시지에
-    `INVALID_AUTH`를 보낸다.
+    `INVALID_AUTH`를 보낸다. `rejections`에 넣어 두면 handshake를 그 HTTP 응답으로 하나씩 거절한다.
     """
 
     def __init__(self) -> None:
@@ -42,6 +44,10 @@ class FakeUpbit:
         """연결마다 맺어진 시각(`time.monotonic()`)."""
         self.subscribed_at: list[float] = []
         """구독 메시지마다 받은 시각(`time.monotonic()`)."""
+        self.rejections: list[tuple[int, str]] = []
+        """(상태 코드, 본문). handshake마다 앞에서 하나씩 꺼내 그 응답으로 거절한다."""
+        self.handshakes = 0
+        """받은 handshake 수(거절한 것 포함)."""
         self._server: Server | None = None
 
     @property
@@ -65,6 +71,13 @@ class FakeUpbit:
         for ws in list(self.connections):
             await ws.close()
 
+    def _process_request(self, ws: ServerConnection, request: Request) -> Response | None:
+        self.handshakes += 1
+        if self.rejections:
+            status, body = self.rejections.pop(0)
+            return ws.respond(status, body)
+        return None
+
     async def _handler(self, ws: ServerConnection) -> None:
         index = len(self.connections)
         self.connections.append(ws)
@@ -82,7 +95,7 @@ class FakeUpbit:
                     await ws.send(json.dumps({"error": error}))
                     continue
                 codes = [code.split(".")[0] for code in payload[1].get("codes", [""])]
-                publisher = asyncio.create_task(self._publish(ws, payload[1]["type"], codes))
+                publisher = asyncio.create_task(self._publish(ws, payload[1], codes))
         except Exception:
             pass
         finally:
@@ -111,10 +124,17 @@ class FakeUpbit:
         self.tokens.append(payload)
         return None
 
-    async def _publish(self, ws: ServerConnection, type_: str, codes: list[str]) -> None:
+    async def _publish(
+        self, ws: ServerConnection, type_obj: dict[str, Any], codes: list[str]
+    ) -> None:
+        type_ = type_obj["type"]
         stream_type = "SNAPSHOT"
         while True:
             for code in codes:
+                if type_ in ("indicator", "indicator_signal"):
+                    for msg in _indicator_messages(type_obj, code):
+                        await ws.send(json.dumps(msg).encode())
+                    continue
                 if type_ == "myAsset":
                     msg = {**MY_ASSET, "stream_type": stream_type}
                 elif type_ == "myOrder":
@@ -126,9 +146,31 @@ class FakeUpbit:
             await asyncio.sleep(PUBLISH_INTERVAL)
 
 
+def _indicator_messages(type_obj: dict[str, Any], code: str) -> list[dict[str, Any]]:
+    """지표 구독 하나에서 `code`의 지표마다 보낼 메시지. 값은 예제 그대로다."""
+
+    sample = INDICATOR if type_obj["type"] == "indicator" else INDICATOR_SIGNAL
+    messages = []
+    for ind in type_obj["indicators"]:
+        msg = {
+            **sample,
+            "code": code,
+            "timeframe": type_obj["timeframe"],
+            "indicator": ind["type"],
+            "params": ind["params"],
+        }
+        if "trigger" in ind:
+            msg["trigger"] = ind["trigger"]
+            msg["event_params"] = ind.get("event_params", {})
+        messages.append(msg)
+    return messages
+
+
 @asynccontextmanager
 async def fake_upbit() -> AsyncIterator[FakeUpbit]:
     fake = FakeUpbit()
-    async with serve(fake._handler, "127.0.0.1", 0) as server:
+    async with serve(
+        fake._handler, "127.0.0.1", 0, process_request=fake._process_request
+    ) as server:
         fake._server = server
         yield fake

@@ -1,8 +1,10 @@
 """가짜 서버와 `Domain`으로 binder 전체를 확인한다."""
 
 import asyncio
+import json
 import time
 
+import pytest
 from trading_core import DataModel, Domain, StageFailed, cast_model
 
 from tests.support.fake_upbit import FakeUpbit
@@ -146,3 +148,74 @@ async def test_close_is_quick_even_if_nobody_reads(server: FakeUpbit) -> None:
     await ctx.aclose()
     assert time.monotonic() - started < 1.0
     await wait_until(lambda: server.open_connections == 0)
+
+
+NO_IP_BODY = (
+    '{"error":{"name":"unauthorized","message":"{"error":{"name":"V1::Exceptions::NoAuthorizationIp",'
+    '"message":"등록되지 않은 IP에서 요청되었습니다. 요청 IP: 203.0.113.7","dialog":"client"}}"}}'
+)
+"""실서버의 IP 미등록 401 본문(2026-10-17, IP만 바꿨다). 안쪽 JSON을 이스케이프하지 않고 `message`에
+그대로 넣어 전체가 올바른 JSON이 아니다."""
+
+ESCAPED_BODY = json.dumps(
+    {
+        "error": {
+            "name": "unauthorized",
+            "message": json.dumps(
+                {
+                    "error": {
+                        "name": "V1::Exceptions::NoAuthorizationIp",
+                        "message": "등록되지 않은 IP에서 요청되었습니다. 요청 IP: 203.0.113.7",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+        }
+    },
+    ensure_ascii=False,
+)
+"""안쪽 JSON을 제대로 이스케이프한 본문. 서버가 고쳐져도 같은 사유를 꺼내야 한다."""
+
+
+@pytest.mark.parametrize("body", [NO_IP_BODY, ESCAPED_BODY], ids=["real", "escaped"])
+@pytest.mark.parametrize("status", [400, 401, 403, 418])
+async def test_handshake_rejection_is_not_retried(
+    domain: Domain, server: FakeUpbit, status: int, body: str
+) -> None:
+    server.rejections = [(status, body)] * 10
+    failures = Failures()
+    async with domain.subscribe(UpbitTickerReq(url=server.url), Recorder(), failures) as sub:
+        await sub.update({"KRW-BTC"})
+        await wait_until(lambda: failures.received, "실패가 알려지지 않았다.")
+    await asyncio.sleep(0.05)  # 재시도했다면 그 사이 handshake가 늘어난다
+
+    assert server.handshakes == 1
+    failed = failures.received[0]
+    assert isinstance(failed.__cause__, UpbitWsError)
+    assert "UpbitWsError: V1::Exceptions::NoAuthorizationIp: 등록되지 않은 IP" in failed.cause
+    assert f"HTTP {status}" in failed.cause
+
+
+@pytest.mark.parametrize("status", [429, 503])
+async def test_handshake_rejection_is_retried_when_transient(
+    domain: Domain, server: FakeUpbit, status: int
+) -> None:
+    server.rejections = [(status, "busy")]
+    rec = Recorder()
+    async with domain.subscribe(UpbitTickerReq(url=server.url), rec) as sub:
+        await sub.update({"KRW-BTC"})
+        await wait_until(lambda: rec.received, "다시 연결해 데이터를 받지 못했다.")
+
+    assert server.handshakes == 2
+
+
+async def test_handshake_rejection_with_plain_body(domain: Domain, server: FakeUpbit) -> None:
+    server.rejections = [(401, "plain text reason")]
+    failures = Failures()
+    async with domain.subscribe(UpbitTickerReq(url=server.url), Recorder(), failures) as sub:
+        await sub.update({"KRW-BTC"})
+        await wait_until(lambda: failures.received, "실패가 알려지지 않았다.")
+
+    cause = failures.received[0].cause
+    assert "HTTP 401" in cause
+    assert "plain text reason" in cause

@@ -144,3 +144,33 @@ MY_ASSET: dict[str, Any] = {
     "timestamp": 1710146517267,
     "stream_type": "REALTIME",
 }
+
+INDICATOR: dict[str, Any] = {
+    "type": "indicator",
+    "code": "KRW-BTC",
+    "timeframe": "5m",
+    "indicator": "macd",
+    "params": {"fast": 12, "slow": 26, "signal_period": 9},
+    "candle_date_time_utc": "2026-09-03T04:50:00",
+    "value": {
+        "macd": 33554.85769535,
+        "macd_signal": 55795.38214693,
+        "histogram": -22240.52445158,
+    },
+    "timestamp": 1788411301096,
+    "stream_type": "REALTIME",
+}
+
+INDICATOR_SIGNAL: dict[str, Any] = {
+    "type": "indicator_signal",
+    "code": "KRW-ARB",
+    "timeframe": "5m",
+    "indicator": "moving_average",
+    "params": {"type": "SMA", "period": 5},
+    "trigger": "price_cross_above",
+    "event_params": {},
+    "candle_date_time_utc": "2026-09-10T07:25:00",
+    "value": {"value": 202.8},
+    "timestamp": 1789025407115,
+    "stream_type": "REALTIME",
+}

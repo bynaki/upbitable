@@ -10,6 +10,7 @@ Upbit 요청 수 제한은 측정 단위가 다르다. 연결 요청은 인증 �
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
 from decimal import Decimal
@@ -19,7 +20,7 @@ from uuid import uuid4
 from trading_core import SourceRequest
 from trading_core.logger import get_logger
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import WebSocketException
+from websockets.exceptions import InvalidStatus, WebSocketException
 
 from upbitable._limits import RateLimiter, Window
 
@@ -28,6 +29,9 @@ PUBLIC_URL = "wss://api.upbit.com/websocket/v1"
 
 PRIVATE_URL = "wss://api.upbit.com/websocket/v1/private"
 """내 주문(myOrder)·내 자산(myAsset) endpoint. JWT 인증이 필요하다."""
+
+INFO_URL = "wss://api.upbit.com/websocket/v1/info"
+"""기술적 지표(indicator·indicator_signal) endpoint. JWT 인증이 필요하다(키 권한은 필요 없다)."""
 
 CONNECT_LIMITS: tuple[Window, ...] = ((5, 1.0),)
 """연결 요청 한도(`websocket-connect`). IP 또는 포켓마다 초당 5회."""
@@ -68,6 +72,48 @@ class UpbitWsError(Exception):
         super().__init__(f"{name}: {message}")
         self.name = name
         self.message = message
+
+
+RETRYABLE_STATUS = frozenset({429})
+"""다시 연결할 handshake 거절 상태 코드(4xx 중). 5xx도 다시 연결한다. 나머지 4xx는 다시 해도 결과가
+같고, 418(일시 차단)은 반복하면 차단이 길어지므로 바로 올린다."""
+
+
+def handshake_error(exc: InvalidStatus) -> UpbitWsError:
+    """handshake 거절을 응답 본문의 사유를 담은 `UpbitWsError`로 바꾼다.
+
+    본문은 `{"error": {"name", "message"}}`이고, `message`에 같은 꼴의 오류가 한 번 더 들어 있으면
+    안쪽 사유를 쓴다. 실서버는 안쪽 JSON을 이스케이프하지 않고 넣어 본문 전체가 올바른 JSON이
+    아니므로(2026-10-17), 그때는 본문에서 마지막 `name`과 JSON이 아닌 마지막 `message`를 찾는다.
+    둘 다 안 되면 본문 앞부분을 그대로 담는다.
+    """
+
+    status = exc.response.status_code
+    body = exc.response.body.decode(errors="replace")
+    error = _error_of(body) or _scan_error(body) or (f"HTTP_{status}", body[:300])
+    if inner := _error_of(error[1]):
+        error = inner
+    name, message = error
+    return UpbitWsError(name, f"{message} (HTTP {status})")
+
+
+def _error_of(text: str) -> tuple[str, str] | None:
+    try:
+        error = json.loads(text)["error"]
+        return str(error["name"]), str(error["message"])
+    except ValueError, TypeError, KeyError:
+        return None
+
+
+_NAME = re.compile(r'"name"\s*:\s*"([^"]*)"')
+_MESSAGE = re.compile(r'"message"\s*:\s*"([^"{][^"]*)"')
+
+
+def _scan_error(text: str) -> tuple[str, str] | None:
+    names, messages = _NAME.findall(text), _MESSAGE.findall(text)
+    if not names or not messages:
+        return None
+    return names[-1], messages[-1]
 
 
 def _json_default(value: object) -> object:
@@ -128,7 +174,13 @@ class WsContext[Treq: SourceRequest]:
         if self._ws is None:
             await connect_limiter(self.limit_key).acquire()
             headers = self._headers() if self._headers else None
-            self._ws = await connect(self.url, additional_headers=headers)
+            try:
+                self._ws = await connect(self.url, additional_headers=headers)
+            except InvalidStatus as exc:
+                status = exc.response.status_code
+                if status < 500 and status not in RETRYABLE_STATUS:
+                    raise handshake_error(exc) from exc
+                raise
             self._messages = RateLimiter(*MESSAGE_LIMITS)
         payload = [{"ticket": self.ticket}, type_obj, {"format": "DEFAULT"}]
         await self._messages.acquire()
@@ -170,8 +222,9 @@ async def stream_messages(ctx: WsContext, type_obj: Message) -> AsyncGenerator[M
     """`type_obj`를 구독하고 받은 메시지를 끝없이 내보낸다.
 
     연결이 끊기면 다시 연결해 같은 구독을 보낸다. 메시지를 받으면 실패 횟수를 0으로 되돌리고,
-    연속 `RETRY_LIMIT`번 실패하면 마지막 예외를 올린다. 서버의 오류 응답(`UpbitWsError`)은
-    재시도하지 않고 올린다. 연결은 닫지 않는다(스테이지가 detach될 때 닫는다).
+    연속 `RETRY_LIMIT`번 실패하면 마지막 예외를 올린다. 서버의 오류 응답과 다시 해도 소용없는
+    handshake 거절(`UpbitWsError`)은 재시도하지 않고 올린다. 연결은 닫지 않는다(스테이지가 detach될
+    때 닫는다).
     """
 
     failures = 0

@@ -20,6 +20,7 @@ import base64
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
 from contextlib import aclosing
 from decimal import Decimal
 from typing import Any, ClassVar, Self
@@ -188,14 +189,19 @@ class UpbitMyAsset(DataModel):
 # ===== binder =====
 
 
+def private_auth(account: str) -> tuple[str, Callable[[], dict[str, str]]]:
+    """자격 증명 `account`로 인증 연결에 쓸 (연결 한도 키, 헤더 콜백)을 만든다.
+
+    헤더 콜백은 부를 때마다 새 JWT를 만든다.
+    """
+
+    cred = load_credential(account, UpbitCredential)
+    return f"pocket:{cred.pocket}", lambda: {"Authorization": f"Bearer {make_token(cred)}"}
+
+
 def _private_context[Treq: UpbitPrivateReq](req: Treq) -> WsContext[Treq]:
-    cred = load_credential(req.account, UpbitCredential)
-    return WsContext(
-        req,
-        req.url,
-        limit_key=f"pocket:{cred.pocket}",
-        headers=lambda: {"Authorization": f"Bearer {make_token(cred)}"},
-    )
+    limit_key, headers = private_auth(req.account)
+    return WsContext(req, req.url, limit_key=limit_key, headers=headers)
 
 
 @initialize
